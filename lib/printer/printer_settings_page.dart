@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as ble;
 
+import 'app_config.dart';
 import 'printer_config.dart';
 import 'printer_service.dart';
 
@@ -24,39 +25,52 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   String? bleCharUuid;
   bool bleWithoutResponse = true;
 
+  // SaaS / App
+  final baseUrlCtrl = TextEditingController(text: "https://mitiendaenlineamx.com.mx/api");
+  bool autoPrint = true;
+  String deviceId = "";
+
   @override
   void initState() {
     super.initState();
-    _load();
+    _loadAll();
   }
 
   @override
   void dispose() {
     hostCtrl.dispose();
     portCtrl.dispose();
+    baseUrlCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _load() async {
+  Future<void> _loadAll() async {
     final cfg = await PrinterService.instance.loadConfig();
-    if (cfg == null) return;
+    final appCfg = await AppConfig.load();
 
     setState(() {
-      // si venía btClassic de configs viejas, lo forzamos a TCP
-      mode = (cfg.mode == PrinterMode.btClassic) ? PrinterMode.tcp : cfg.mode;
+      // impresora
+      if (cfg != null) {
+        mode = (cfg.mode == PrinterMode.btClassic) ? PrinterMode.tcp : cfg.mode;
 
-      hostCtrl.text = cfg.host ?? "";
-      portCtrl.text = (cfg.port ?? 9100).toString();
+        hostCtrl.text = cfg.host ?? "";
+        portCtrl.text = (cfg.port ?? 9100).toString();
 
-      bleServiceUuid = cfg.bleServiceUuid;
-      bleCharUuid = cfg.bleCharUuid;
-      bleWithoutResponse = cfg.bleWithoutResponse ?? true;
-      // NOTA: no podemos reconstruir bleSelected solo con el id (no tenemos ScanResult)
-      bleSelected = null;
+        bleServiceUuid = cfg.bleServiceUuid;
+        bleCharUuid = cfg.bleCharUuid;
+        bleWithoutResponse = cfg.bleWithoutResponse ?? true;
+        bleSelected = null; // no reconstruimos ScanResult
+      }
+
+      // app
+      baseUrlCtrl.text = appCfg.baseUrl;
+      autoPrint = appCfg.autoPrintEnabled;
+      deviceId = appCfg.deviceId;
     });
   }
 
   Future<void> _save() async {
+    // --- guarda impresora ---
     if (mode == PrinterMode.tcp) {
       final host = hostCtrl.text.trim();
       final port = int.tryParse(portCtrl.text.trim()) ?? 9100;
@@ -66,23 +80,31 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
       await PrinterService.instance.saveConfig(
         PrinterConfig(mode: PrinterMode.tcp, host: host, port: port),
       );
-      return;
+    } else {
+      if (bleSelected == null || bleServiceUuid == null || bleCharUuid == null) {
+        throw Exception("Selecciona impresora BLE y detecta UUIDs de escritura");
+      }
+
+      await PrinterService.instance.saveConfig(
+        PrinterConfig(
+          mode: PrinterMode.ble,
+          bleDeviceId: bleSelected!.device.remoteId.str,
+          bleServiceUuid: bleServiceUuid,
+          bleCharUuid: bleCharUuid,
+          bleWithoutResponse: bleWithoutResponse,
+        ),
+      );
     }
 
-    // BLE
-    if (bleSelected == null || bleServiceUuid == null || bleCharUuid == null) {
-      throw Exception("Selecciona impresora BLE y detecta UUIDs de escritura");
-    }
+    // --- guarda config app ---
+    final base = baseUrlCtrl.text.trim();
+    if (base.isEmpty) throw Exception("Base URL no puede ir vacía");
 
-    await PrinterService.instance.saveConfig(
-      PrinterConfig(
-        mode: PrinterMode.ble,
-        bleDeviceId: bleSelected!.device.remoteId.str,
-        bleServiceUuid: bleServiceUuid,
-        bleCharUuid: bleCharUuid,
-        bleWithoutResponse: bleWithoutResponse,
-      ),
-    );
+    await AppConfig.save(AppConfig(
+      baseUrl: base,
+      autoPrintEnabled: autoPrint,
+      deviceId: deviceId,
+    ));
   }
 
   Future<void> _testPrint() async {
@@ -122,9 +144,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
         children: results.map((r) {
           final name = r.device.advName.isNotEmpty
               ? r.device.advName
-              : (r.advertisementData.advName.isNotEmpty
-                  ? r.advertisementData.advName
-                  : "(sin nombre)");
+              : (r.advertisementData.advName.isNotEmpty ? r.advertisementData.advName : "(sin nombre)");
           return ListTile(
             title: Text(name),
             subtitle: Text("RSSI ${r.rssi} • ${r.device.remoteId.str}"),
@@ -197,7 +217,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(12),
         children: [
-          const Text("Modo", style: TextStyle(fontWeight: FontWeight.bold)),
+          const Text("Modo de impresora", style: TextStyle(fontWeight: FontWeight.bold)),
           RadioListTile<PrinterMode>(
             value: PrinterMode.tcp,
             groupValue: mode,
@@ -234,6 +254,27 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
               ),
             ),
           ],
+
+          const SizedBox(height: 12),
+          const Divider(),
+          const Text("Configuración SaaS", style: TextStyle(fontWeight: FontWeight.bold)),
+
+          TextField(
+            controller: baseUrlCtrl,
+            decoration: const InputDecoration(labelText: "Base URL API"),
+          ),
+
+          SwitchListTile(
+            value: autoPrint,
+            title: const Text("Impresión automática"),
+            subtitle: const Text("Si está ON, la app preguntará al SaaS cada 2s si hay tickets pendientes."),
+            onChanged: (v) => setState(() => autoPrint = v),
+          ),
+
+          ListTile(
+            title: const Text("Device ID"),
+            subtitle: Text(deviceId),
+          ),
 
           const SizedBox(height: 12),
           ElevatedButton(
