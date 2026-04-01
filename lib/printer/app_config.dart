@@ -4,26 +4,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AppConfig {
   static const _k = "app_config";
 
-  final String baseUrl;
   final bool autoPrintEnabled;
-  final String deviceId;
 
   const AppConfig({
-    required this.baseUrl,
     required this.autoPrintEnabled,
-    required this.deviceId,
   });
 
   Map<String, dynamic> toMap() => {
-        "baseUrl": baseUrl,
         "autoPrintEnabled": autoPrintEnabled,
-        "deviceId": deviceId,
       };
 
   static AppConfig fromMap(Map<String, dynamic> m) => AppConfig(
-        baseUrl: m["baseUrl"] ?? "https://mitiendaenlineamx.com.mx/api",
-        autoPrintEnabled: m["autoPrintEnabled"] ?? true,
-        deviceId: m["deviceId"] ?? "",
+        autoPrintEnabled: m["autoPrintEnabled"] ?? false,
       );
 
   static Future<AppConfig> load() async {
@@ -31,11 +23,8 @@ class AppConfig {
     final raw = sp.getString(_k);
 
     if (raw == null) {
-      final id = "dev_${DateTime.now().millisecondsSinceEpoch}";
-      final cfg = AppConfig(
-        baseUrl: "https://mitiendaenlineamx.com.mx/api",
-        autoPrintEnabled: true,
-        deviceId: id,
+      const cfg = AppConfig(
+        autoPrintEnabled: false,
       );
       await save(cfg);
       return cfg;

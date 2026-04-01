@@ -1,13 +1,8 @@
-import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:http/http.dart' as http;
 
-import 'printer/app_config.dart';
-import 'printer/printer_settings_page.dart';
 import 'printer/printer_service.dart';
+import 'printer/printer_settings_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,125 +32,6 @@ class _WebTestState extends State<WebTest> {
   double progress = 0;
   String? error;
 
-  Timer? _pollTimer;
-  bool _printing = false; // evita doble ejecución
-  AppConfig? _appCfg;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadAndStart();
-  }
-
-  @override
-  void dispose() {
-    _pollTimer?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _loadAndStart() async {
-    final cfg = await AppConfig.load();
-    _appCfg = cfg;
-
-    _startPolling(); // arranca si autoPrintEnabled
-  }
-
-  void _stopPolling() {
-    _pollTimer?.cancel();
-    _pollTimer = null;
-  }
-
-  void _startPolling() async {
-    _stopPolling();
-
-    final cfg = _appCfg ?? await AppConfig.load();
-    _appCfg = cfg;
-
-    if (!cfg.autoPrintEnabled) return;
-
-    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      if (_printing) return;
-
-      try {
-        _printing = true;
-
-        // endpoints todavía no existen, pero la app queda lista
-        final url = "${cfg.baseUrl}/print-jobs/next?device_id=${Uri.encodeComponent(cfg.deviceId)}";
-        final res = await http.get(Uri.parse(url), headers: {
-          "Accept": "application/json",
-        });
-
-        // ✅ si Laravel decide responder 204 cuando no hay jobs
-        if (res.statusCode == 204) return;
-
-        if (res.statusCode != 200) {
-          // no rompemos, solo ignoramos
-          return;
-        }
-
-        final data = jsonDecode(res.body);
-        if (data == null) return;
-
-        final jobIdRaw = data["id"];
-        final payloadRaw = data["payload"];
-        if (jobIdRaw == null || payloadRaw == null) return;
-
-        final jobId = (jobIdRaw as num).toInt();
-        final payload = Map<String, dynamic>.from(payloadRaw as Map);
-
-        // 1) imprime con tu config (TCP o BLE)
-        await PrinterService.instance.printJob(payload);
-
-        // 2) confirma done
-        await http.post(
-          Uri.parse("${cfg.baseUrl}/print-jobs/$jobId/done"),
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-          },
-          body: jsonEncode({}),
-        );
-      } catch (_) {
-        // aquí luego metemos /failed cuando exista endpoint
-      } finally {
-        _printing = false;
-      }
-    });
-  }
-
-  Future<void> _openSettings() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
-    );
-
-    // Recargar config por si cambiaron baseUrl/autoprint/deviceId
-    _appCfg = await AppConfig.load();
-
-    // Reiniciar polling según la config
-    _startPolling();
-
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Configuración guardada")),
-    );
-  }
-
-  Future<void> _testPrint() async {
-    try {
-      await PrinterService.instance.printDemo();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("✅ Impresión enviada")),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("❌ $e")),
-      );
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -163,14 +39,40 @@ class _WebTestState extends State<WebTest> {
         title: const Text("MI TIENDA EN LINEAMX"),
         actions: [
           IconButton(
-            tooltip: "Configurar impresora / SaaS",
+            tooltip: "Configurar impresora",
             icon: const Icon(Icons.settings),
-            onPressed: _openSettings,
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const PrinterSettingsPage(),
+                ),
+              );
+
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Configuración guardada")),
+              );
+            },
           ),
           IconButton(
             tooltip: "Imprimir prueba",
             icon: const Icon(Icons.print),
-            onPressed: _testPrint,
+            onPressed: () async {
+              try {
+                await PrinterService.instance.printDemo();
+
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("✅ Impresión enviada")),
+                );
+              } catch (e) {
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text("❌ $e")),
+                );
+              }
+            },
           ),
         ],
       ),
@@ -178,32 +80,94 @@ class _WebTestState extends State<WebTest> {
         children: [
           InAppWebView(
             initialUrlRequest: URLRequest(
-              url: WebUri("https://mitiendaenlineamx.com.mx/"),
+              url: WebUri("https://mitiendaenlineamx.com.mx/login-register"),
             ),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
               transparentBackground: false,
               useHybridComposition: true,
             ),
+            onWebViewCreated: (controller) {
+              controller.addJavaScriptHandler(
+                handlerName: 'printTicket',
+                callback: (args) async {
+                  try {
+                    if (args.isEmpty) {
+                      throw Exception("No se recibió request de impresión");
+                    }
+
+                    final raw = args.first;
+                    final request = Map<String, dynamic>.from(raw as Map);
+
+                    final payloadRaw = request["payload"];
+                    if (payloadRaw == null || payloadRaw is! Map) {
+                      throw Exception("No se recibió payload válido");
+                    }
+
+                    final payload = Map<String, dynamic>.from(payloadRaw);
+
+                    final host = (request["host"] ?? "").toString().trim();
+
+                    int? port;
+                    final portRaw = request["port"];
+                    if (portRaw is num) {
+                      port = portRaw.toInt();
+                    } else if (portRaw != null) {
+                      port = int.tryParse(portRaw.toString());
+                    }
+
+                    debugPrint("bridge printTicket -> request keys: ${request.keys.toList()}");
+                    debugPrint("bridge printTicket -> host: $host");
+                    debugPrint("bridge printTicket -> port: $port");
+                    debugPrint("bridge printTicket -> payload keys: ${payload.keys.toList()}");
+                    debugPrint("bridge printTicket -> payload: $payload");
+
+                    await PrinterService.instance.printJob(
+                      payload,
+                      host: host.isEmpty ? null : host,
+                      port: port,
+                    );
+
+                    return {
+                      "ok": true,
+                      "message": "Impresión enviada",
+                    };
+                  } catch (e, st) {
+                    debugPrint("bridge printTicket -> error: $e");
+                    debugPrint("$st");
+                    return {
+                      "ok": false,
+                      "message": e.toString(),
+                    };
+                  }
+                },
+              );
+            },
             onProgressChanged: (controller, p) {
               if (!mounted) return;
               setState(() => progress = p / 100.0);
             },
-            onLoadError: (controller, url, code, message) {
+            onReceivedError: (controller, request, errorObj) {
               if (!mounted) return;
-              setState(() => error = "($code) $message");
+              setState(() => error = errorObj.description);
             },
-            onLoadHttpError: (controller, url, statusCode, description) {
+            onReceivedHttpError: (controller, request, responseError) {
               if (!mounted) return;
-              setState(() => error = "HTTP $statusCode: $description");
+              setState(() {
+                error = "HTTP ${responseError.statusCode}";
+              });
             },
           ),
-          if (progress < 1 && error == null) LinearProgressIndicator(value: progress),
+          if (progress < 1 && error == null)
+            LinearProgressIndicator(value: progress),
           if (error != null)
             Center(
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text(error!, textAlign: TextAlign.center),
+                child: Text(
+                  error!,
+                  textAlign: TextAlign.center,
+                ),
               ),
             ),
         ],

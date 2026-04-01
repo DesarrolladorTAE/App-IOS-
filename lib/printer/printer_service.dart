@@ -2,12 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:esc_pos_utils_plus/esc_pos_utils_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as ble;
-import 'package:shared_preferences/shared_preferences.dart';
-
-import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'printer_config.dart';
 
@@ -17,82 +15,159 @@ class PrinterService {
 
   static const _prefsKey = "printer_config";
 
+  static const int cols80mm = 48;
+  static const int dots80mm = 576;
+
   Future<void> saveConfig(PrinterConfig cfg) async {
     final sp = await SharedPreferences.getInstance();
     await sp.setString(_prefsKey, jsonEncode(cfg.toMap()));
+    debugPrint("saveConfig -> ${jsonEncode(cfg.toMap())}");
   }
 
   Future<PrinterConfig?> loadConfig() async {
     final sp = await SharedPreferences.getInstance();
     final raw = sp.getString(_prefsKey);
+
+    debugPrint("loadConfig -> raw: $raw");
+
     if (raw == null) return null;
     return PrinterConfig.fromMap(jsonDecode(raw));
   }
 
-  // ---------------- DEMO TICKET ----------------
-  Future<List<int>> buildDemoTicketBytes() async {
-    final profile = await CapabilityProfile.load();
-    final gen = Generator(PaperSize.mm80, profile);
-
-    final bytes = <int>[];
-    bytes.addAll(
-      gen.text(
-        "MI TIENDA EN LINEAMX",
-        styles: const PosStyles(align: PosAlign.center, bold: true),
-      ),
-    );
-    bytes.addAll(
-      gen.text(
-        "Prueba de impresión",
-        styles: const PosStyles(align: PosAlign.center),
-      ),
-    );
-    bytes.addAll(gen.hr());
-    bytes.addAll(gen.text("Fecha: ${DateTime.now()}"));
-    bytes.addAll(
-      gen.text("Total: \$123.45", styles: const PosStyles(bold: true)),
-    );
-    bytes.addAll(gen.feed(2));
-    bytes.addAll(gen.cut());
-    return bytes;
-  }
+  // =========================
+  // DEMO
+  // =========================
 
   Future<void> printDemo() async {
     final cfg = await loadConfig();
-    if (cfg == null) throw Exception("No hay impresora configurada");
-
-    final bytes = await buildDemoTicketBytes();
-
-    switch (cfg.mode) {
-      case PrinterMode.tcp:
-        await _printTcp(host: cfg.host!, port: cfg.port ?? 9100, bytes: bytes);
-        break;
-      case PrinterMode.ble:
-        await _printBle(
-          deviceId: cfg.bleDeviceId!,
-          serviceUuid: cfg.bleServiceUuid!,
-          charUuid: cfg.bleCharUuid!,
-          withoutResponse: cfg.bleWithoutResponse ?? true,
-          bytes: bytes,
-        );
-        break;
-      case PrinterMode.btClassic:
-        throw Exception("BT clásico deshabilitado. Usa BLE o TCP.");
+    if (cfg == null) {
+      throw Exception("No hay impresora configurada");
     }
+
+    final bytes = _buildTicket(
+      textBeforeQr:
+          "PRUEBA SIMPLE\nMI TIENDA EN LINEAMX\nHOLA MUNDO\nTOTAL: \$123.85",
+      textAfterQr: "Gracias por su compra",
+      qrText: "https://mitiendaenlineamx.com.mx",
+      cut: true,
+      shouldOpenDrawer: true,
+      drawerPin: 0,
+      qrSize: 8,
+      qrEcc: 49,
+      logoMaxWidth: 220,
+    );
+
+    await _sendToConfiguredPrinter(cfg, bytes);
   }
 
-  // ---------------- PRINT JOB (payload desde SaaS) ----------------
-  Future<void> printJob(Map<String, dynamic> payload) async {
+  // =========================
+  // PRINT JOB
+  // =========================
+
+  Future<void> printJob(
+    Map<String, dynamic> payload, {
+    String? host,
+    int? port,
+  }) async {
+    debugPrint("=== ENTRO A printJob CON BACKEND REAL ===");
+    debugPrint("printJob -> payload keys: ${payload.keys.toList()}");
+    debugPrint("printJob -> payload: $payload");
+    debugPrint("printJob -> host override: $host");
+    debugPrint("printJob -> port override: $port");
+
+    final textBeforeQr = _readString(payload["textBeforeQr"]);
+    final textAfterQr = _readString(payload["textAfterQr"]);
+    final qrText = _readString(payload["qrText"]);
+
+    final imageBase64 = _firstNonEmptyString([
+      payload["imageBase64"],
+      payload["logo"],
+      payload["logoBase64"],
+      payload["image"],
+      payload["logo_base64"],
+      payload["image_base64"],
+    ]);
+
+    final cut = _readBool(payload["cut"], fallback: true);
+    final shouldOpenDrawer = _readBool(
+      payload["shouldOpenDrawer"] ?? payload["openDrawer"],
+      fallback: false,
+    );
+    final drawerPin = _readInt(payload["drawerPin"], fallback: 0);
+    final qrSize = _readInt(payload["qrSize"], fallback: 8).clamp(1, 16);
+    final qrEcc = _readInt(payload["qrEcc"], fallback: 49).clamp(48, 51);
+    final logoMaxWidth =
+        _readInt(payload["logoMaxWidth"], fallback: 260).clamp(64, dots80mm);
+
+    debugPrint("printJob -> textBeforeQr len: ${textBeforeQr.length}");
+    debugPrint("printJob -> textAfterQr len: ${textAfterQr.length}");
+    debugPrint("printJob -> qrText len: ${qrText.length}");
+    debugPrint("printJob -> imageBase64 len: ${imageBase64.length}");
+    debugPrint("printJob -> cut: $cut");
+    debugPrint("printJob -> shouldOpenDrawer: $shouldOpenDrawer");
+    debugPrint("printJob -> drawerPin: $drawerPin");
+    debugPrint("printJob -> qrSize: $qrSize");
+    debugPrint("printJob -> qrEcc: $qrEcc");
+    debugPrint("printJob -> logoMaxWidth: $logoMaxWidth");
+
+    final bytes = _buildTicket(
+      textBeforeQr: textBeforeQr,
+      textAfterQr: textAfterQr.isEmpty ? null : textAfterQr,
+      imageBase64: imageBase64.isEmpty ? null : imageBase64,
+      qrText: qrText.isEmpty ? null : qrText,
+      cut: cut,
+      shouldOpenDrawer: shouldOpenDrawer,
+      drawerPin: drawerPin,
+      qrSize: qrSize,
+      qrEcc: qrEcc,
+      logoMaxWidth: logoMaxWidth,
+    );
+
+    debugPrint("printJob -> bytes length: ${bytes.length}");
+
+    if (host != null && host.trim().isNotEmpty) {
+      await _printTcp(
+        host: host.trim(),
+        port: port ?? 9100,
+        bytes: bytes,
+      );
+      return;
+    }
+
     final cfg = await loadConfig();
-    if (cfg == null) throw Exception("No hay impresora configurada");
+    if (cfg == null) {
+      throw Exception("No hay impresora configurada");
+    }
 
-    final bytes = await buildBytesFromJob(payload);
+    await _sendToConfiguredPrinter(cfg, bytes);
+  }
+
+  Future<void> _sendToConfiguredPrinter(
+    PrinterConfig cfg,
+    List<int> bytes,
+  ) async {
+    debugPrint("_sendToConfiguredPrinter -> mode: ${cfg.mode}");
 
     switch (cfg.mode) {
       case PrinterMode.tcp:
-        await _printTcp(host: cfg.host!, port: cfg.port ?? 9100, bytes: bytes);
+        if (cfg.host == null || cfg.host!.trim().isEmpty) {
+          throw Exception("No hay IP/host configurado para TCP");
+        }
+
+        await _printTcp(
+          host: cfg.host!,
+          port: cfg.port ?? 9100,
+          bytes: bytes,
+        );
         break;
+
       case PrinterMode.ble:
+        if ((cfg.bleDeviceId ?? '').isEmpty ||
+            (cfg.bleServiceUuid ?? '').isEmpty ||
+            (cfg.bleCharUuid ?? '').isEmpty) {
+          throw Exception("Configuración BLE incompleta");
+        }
+
         await _printBle(
           deviceId: cfg.bleDeviceId!,
           serviceUuid: cfg.bleServiceUuid!,
@@ -101,206 +176,370 @@ class PrinterService {
           bytes: bytes,
         );
         break;
+
       case PrinterMode.btClassic:
         throw Exception("BT clásico deshabilitado. Usa BLE o TCP.");
     }
   }
 
-  // ---------------- JOB -> BYTES (drawer + logo + qr + cut) ----------------
-  /// payload esperado (mínimo):
-  /// {
-  ///   "open_drawer": true,
-  ///   "drawer_pin": 2,
-  ///   "store_name": "Mi Tienda",
-  ///   "address": "Calle ...",
-  ///   "lines": [
-  ///     {"text":"VENTA #123", "align":"center", "bold":true, "double":true},
-  ///     {"hr":true},
-  ///     {"text":"Producto X   1   $10.00", "align":"left"},
-  ///   ],
-  ///   "logo_url": "https://....png",
-  ///   "qr": "https://....",
-  ///   "cut": true
-  /// }
-  Future<List<int>> buildBytesFromJob(Map<String, dynamic> payload) async {
-    final profile = await CapabilityProfile.load();
-    final gen = Generator(PaperSize.mm80, profile);
+  // =========================
+  // ESC/POS BUILDER
+  // =========================
 
-    const int maxChars = 48;
+  List<int> _buildTicket({
+    required String textBeforeQr,
+    String? textAfterQr,
+    bool cut = true,
+    bool shouldOpenDrawer = false,
+    int drawerPin = 0,
+    String? imageBase64,
+    String? qrText,
+    int qrSize = 8,
+    int qrEcc = 49,
+    int logoMaxWidth = 160,
+  }) {
+    final out = <int>[];
 
-    final bytes = <int>[];
-    bytes.addAll(gen.reset());
+    out.addAll(_init());
 
-    // Drawer
-    if (payload["open_drawer"] == true) {
-      final pin = (payload["drawer_pin"] as num?)?.toInt() ?? 2;
-      bytes.addAll(
-        gen.drawer(pin: (pin == 5) ? PosDrawer.pin5 : PosDrawer.pin2),
-      );
-      bytes.addAll(gen.feed(1));
+    if (shouldOpenDrawer) {
+      debugPrint("_buildTicket -> abriendo cajon al inicio (pin=$drawerPin)");
+
+      // Doble pulso: algunas impresoras/cajones responden mejor así
+      out.addAll(_drawerPulse(m: drawerPin, t1: 60, t2: 255));
+      out.addAll(_lf(1));
+      out.addAll(_drawerPulseAlt(m: drawerPin, t1: 60, t2: 255));
+      out.addAll(_lf(1));
     }
 
-    // Logo
-    final logoUrl = (payload["logo_url"] as String?)?.trim();
-    if (logoUrl != null && logoUrl.isNotEmpty) {
-      final logo = await _downloadAndPrepareImage(logoUrl, maxWidth: 560);
-      if (logo != null) {
-        bytes.addAll(gen.imageRaster(logo, align: PosAlign.center));
-        bytes.addAll(gen.feed(1));
-      }
+    if (imageBase64 != null && imageBase64.trim().isNotEmpty) {
+      debugPrint("_buildTicket -> imprimiendo logo");
+      out.addAll(_alignCenter());
+      out.addAll(_imageFromBase64(imageBase64, maxDotsWidth: logoMaxWidth));
+      out.addAll(_lf(1));
+      out.addAll(_alignLeft());
+    } else {
+      debugPrint("_buildTicket -> sin logo");
     }
 
-    // Store name + address
-    final storeName = (payload["store_name"] as String?)?.trim();
-    if (storeName != null && storeName.isNotEmpty) {
-      bytes.addAll(
-        gen.text(
-          storeName,
-          styles: const PosStyles(align: PosAlign.center, bold: true),
-        ),
-      );
+    if (textBeforeQr.trim().isNotEmpty) {
+      out.addAll(_alignLeft());
+      out.addAll(_text(textBeforeQr));
+      out.addAll(_lf(1));
     }
 
-    final address = (payload["address"] as String?)?.trim();
-    if (address != null && address.isNotEmpty) {
-      for (final line in _wrap(address, maxChars)) {
-        bytes.addAll(
-          gen.text(line, styles: const PosStyles(align: PosAlign.center)),
-        );
-      }
+    if (qrText != null && qrText.trim().isNotEmpty) {
+      out.addAll(_alignCenter());
+      out.addAll(_qr(qrText, size: qrSize, ecc: qrEcc));
+      out.addAll(_lf(1));
+      out.addAll(_alignCenter());
     }
 
-    bytes.addAll(gen.hr(ch: '-'));
-
-    // Lines
-    final lines = (payload["lines"] as List?) ?? const [];
-    for (final it in lines) {
-      if (it is! Map) continue;
-      final m = Map<String, dynamic>.from(it as Map);
-
-      if (m["hr"] == true) {
-        bytes.addAll(gen.hr(ch: '-'));
-        continue;
-      }
-
-      final feed = (m["feed"] as num?)?.toInt();
-      if (feed != null && feed > 0) {
-        bytes.addAll(gen.feed(feed));
-        continue;
-      }
-
-      final text = (m["text"] as String?) ?? "";
-      if (text.isEmpty) continue;
-
-      final align = _parseAlign((m["align"] as String?) ?? "left");
-      final bold = m["bold"] == true;
-      final dbl = m["double"] == true;
-
-      bytes.addAll(
-        gen.text(
-          text,
-          styles: PosStyles(
-            align: align,
-            bold: bold,
-            height: dbl ? PosTextSize.size2 : PosTextSize.size1,
-            width: dbl ? PosTextSize.size2 : PosTextSize.size1,
-          ),
-        ),
-      );
+    if (textAfterQr != null && textAfterQr.trim().isNotEmpty) {
+      out.addAll(_text(textAfterQr));
+      out.addAll(_lf(1));
     }
 
-    // QR
-    final qr = (payload["qr"] as String?)?.trim();
-    if (qr != null && qr.isNotEmpty) {
-      bytes.addAll(gen.feed(1));
-      bytes.addAll(gen.qrcode(qr, align: PosAlign.center, size: QRSize.size6));
-      bytes.addAll(gen.feed(1));
+    out.addAll(_lf(2));
+
+    if (cut) {
+      out.addAll(_cutPartial());
     }
 
-    // Footer lines (opcional)
-    final footer = (payload["footer"] as List?) ?? const [];
-    for (final f in footer) {
-      final txt = (f as String?)?.trim();
-      if (txt == null || txt.isEmpty) continue;
-      for (final line in _wrap(txt, maxChars)) {
-        bytes.addAll(
-          gen.text(line, styles: const PosStyles(align: PosAlign.center)),
-        );
-      }
-    }
-
-    bytes.addAll(gen.feed(2));
-
-    final cut = payload["cut"] == null ? true : payload["cut"] == true;
-    if (cut) bytes.addAll(gen.cut());
-
-    return bytes;
-  }
-
-  PosAlign _parseAlign(String a) {
-    switch (a.toLowerCase().trim()) {
-      case "center":
-        return PosAlign.center;
-      case "right":
-        return PosAlign.right;
-      default:
-        return PosAlign.left;
-    }
-  }
-
-  List<String> _wrap(String text, int width) {
-    final clean = text.replaceAll('\r', '').split('\n');
-    final out = <String>[];
-
-    for (final rawLine in clean) {
-      var line = rawLine.trimRight();
-      while (line.length > width) {
-        out.add(line.substring(0, width));
-        line = line.substring(width);
-      }
-      if (line.isNotEmpty) out.add(line);
-    }
     return out;
   }
 
-  Future<img.Image?> _downloadAndPrepareImage(
-    String url, {
-    required int maxWidth,
-  }) async {
+  List<int> _init() => [0x1B, 0x40];
+
+  List<int> _lf([int lines = 1]) {
+    final count = lines <= 0 ? 1 : lines;
+    return List<int>.filled(count, 0x0A);
+  }
+
+  List<int> _cutFull() => [0x1D, 0x56, 0x00];
+
+  List<int> _cutPartial() => [0x1D, 0x56, 0x42, 0x00];
+
+  List<int> _alignLeft() => [0x1B, 0x61, 0x00];
+
+  List<int> _alignCenter() => [0x1B, 0x61, 0x01];
+
+  List<int> _alignRight() => [0x1B, 0x61, 0x02];
+
+  List<int> _bold(bool on) => [0x1B, 0x45, on ? 0x01 : 0x00];
+
+  // ESC p m t1 t2
+  List<int> _drawerPulse({int m = 0, int t1 = 60, int t2 = 255}) {
+    return [0x1B, 0x70, m & 0xFF, t1 & 0xFF, t2 & 0xFF];
+  }
+
+  // Variante alternativa usada por algunos modelos
+  List<int> _drawerPulseAlt({int m = 0, int t1 = 60, int t2 = 255}) {
+    return [0x1B, 0x70, (m == 0 ? 1 : 0) & 0xFF, t1 & 0xFF, t2 & 0xFF];
+  }
+
+  List<int> _text(String text) {
+    final clean =
+        _sanitizeText(text).replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    return latin1.encode(clean);
+  }
+
+  List<int> _hr({int cols = cols80mm, String ch = '-'}) {
+    return latin1.encode("${ch * cols}\n");
+  }
+
+  List<int> _lineLR(String left, String right, {int cols = cols80mm}) {
+    final l = left.length > cols ? left.substring(0, cols) : left;
+    final r = right.length > cols ? right.substring(0, cols) : right;
+    final spaces = (cols - l.length - r.length).clamp(1, cols);
+    return latin1.encode("$l${' ' * spaces}$r\n");
+  }
+
+  // =========================
+  // IMAGEN -> ESC/POS raster GS v 0
+  // =========================
+
+  List<int> _imageFromBase64(
+    String base64OrDataUrl, {
+    int maxDotsWidth = dots80mm,
+  }) {
     try {
-      final res = await http.get(Uri.parse(url));
-      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      final raw = base64OrDataUrl.trim();
+      if (raw.isEmpty) {
+        debugPrint("_imageFromBase64 -> vacio");
+        return [];
+      }
 
-      final decoded = img.decodeImage(res.bodyBytes);
-      if (decoded == null) return null;
+      final clean = raw.contains('base64,')
+          ? raw.split('base64,').last.trim()
+          : raw;
 
-      final resized = decoded.width > maxWidth
-          ? img.copyResize(decoded, width: maxWidth)
-          : decoded;
-      final gray = img.grayscale(resized);
-      return gray;
-    } catch (_) {
-      return null;
+      debugPrint("_imageFromBase64 -> raw len: ${raw.length}");
+      debugPrint("_imageFromBase64 -> clean len: ${clean.length}");
+
+      final bytes = base64Decode(clean);
+      debugPrint("_imageFromBase64 -> decoded bytes: ${bytes.length}");
+
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) {
+        debugPrint("_imageFromBase64 -> decodeImage devolvio null");
+        return [];
+      }
+
+      debugPrint(
+        "_imageFromBase64 -> original image: ${decoded.width}x${decoded.height}",
+      );
+
+      final scaled = _scaleImageToWidth(decoded, maxDotsWidth);
+
+      debugPrint(
+        "_imageFromBase64 -> scaled image: ${scaled.width}x${scaled.height}",
+      );
+
+      final raster = _bitmapToRasterEscPos(scaled);
+      debugPrint("_imageFromBase64 -> raster bytes: ${raster.length}");
+
+      return raster;
+    } catch (e, st) {
+      debugPrint("_imageFromBase64 -> error: $e");
+      debugPrint("$st");
+      return [];
     }
   }
 
-  // ---------------- TCP / ETHERNET ----------------
+  img.Image _scaleImageToWidth(img.Image src, int maxWidth) {
+    if (src.width <= maxWidth) return src;
+
+    final ratio = maxWidth / src.width;
+    final h = (src.height * ratio).round().clamp(1, 100000);
+
+    return img.copyResize(
+      src,
+      width: maxWidth,
+      height: h,
+      interpolation: img.Interpolation.average,
+    );
+  }
+
+  List<int> _bitmapToRasterEscPos(img.Image bitmap) {
+    final width = bitmap.width;
+    final height = bitmap.height;
+
+    final bytesPerRow = (width + 7) ~/ 8;
+    final imageBytes = Uint8List(bytesPerRow * height);
+
+    var idx = 0;
+    for (var y = 0; y < height; y++) {
+      for (var xByte = 0; xByte < bytesPerRow; xByte++) {
+        var b = 0;
+        for (var bit = 0; bit < 8; bit++) {
+          final x = xByte * 8 + bit;
+          final pixelOn = x < width ? _isBlack(bitmap.getPixel(x, y)) : false;
+          if (pixelOn) {
+            b |= (0x80 >> bit);
+          }
+        }
+        imageBytes[idx++] = b;
+      }
+    }
+
+    final xL = bytesPerRow & 0xFF;
+    final xH = (bytesPerRow >> 8) & 0xFF;
+    final yL = height & 0xFF;
+    final yH = (height >> 8) & 0xFF;
+
+    return [
+      0x1D, 0x76, 0x30, 0x00,
+      xL, xH, yL, yH,
+      ...imageBytes,
+      0x0A,
+    ];
+  }
+
+  bool _isBlack(img.Pixel p) {
+    final a = p.a.toInt();
+    if (a < 128) return false;
+
+    final r = p.r.toInt();
+    final g = p.g.toInt();
+    final b = p.b.toInt();
+
+    final lum = (0.299 * r + 0.587 * g + 0.114 * b);
+    return lum < 180;
+  }
+
+  // =========================
+  // QR ESC/POS (GS ( k)
+  // =========================
+
+  List<int> _qr(String content, {int size = 8, int ecc = 49}) {
+    final data = utf8.encode(content);
+    final out = <int>[];
+
+    final s = size.clamp(1, 16);
+    final e = ecc.clamp(48, 51);
+
+    out.addAll([0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]);
+    out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, s]);
+    out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, e]);
+
+    final len = data.length + 3;
+    final pL = len & 0xFF;
+    final pH = (len >> 8) & 0xFF;
+
+    out.addAll([0x1D, 0x28, 0x6B, pL, pH, 0x31, 0x50, 0x30]);
+    out.addAll(data);
+
+    out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30]);
+    out.add(0x0A);
+
+    return out;
+  }
+
+  // =========================
+  // HELPERS
+  // =========================
+
+  String _readString(dynamic value) {
+    if (value == null) return '';
+    return value.toString();
+  }
+
+  String _firstNonEmptyString(List<dynamic> values) {
+    for (final value in values) {
+      final s = _readString(value).trim();
+      if (s.isNotEmpty) return s;
+    }
+    return '';
+  }
+
+  int _readInt(dynamic value, {int fallback = 0}) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  bool _readBool(dynamic value, {bool fallback = false}) {
+    if (value is bool) return value;
+    final s = (value?.toString() ?? '').trim().toLowerCase();
+    if (s == 'true' || s == '1') return true;
+    if (s == 'false' || s == '0') return false;
+    return fallback;
+  }
+
+  String _sanitizeText(String input) {
+    return input
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .replaceAll('á', 'a')
+        .replaceAll('é', 'e')
+        .replaceAll('í', 'i')
+        .replaceAll('ó', 'o')
+        .replaceAll('ú', 'u')
+        .replaceAll('Á', 'A')
+        .replaceAll('É', 'E')
+        .replaceAll('Í', 'I')
+        .replaceAll('Ó', 'O')
+        .replaceAll('Ú', 'U')
+        .replaceAll('ñ', 'n')
+        .replaceAll('Ñ', 'N')
+        .replaceAll('ü', 'u')
+        .replaceAll('Ü', 'U')
+        .replaceAll('“', '"')
+        .replaceAll('”', '"')
+        .replaceAll('‘', "'")
+        .replaceAll('’', "'")
+        .replaceAll('–', '-')
+        .replaceAll('—', '-')
+        .replaceAll('•', '-')
+        .replaceAll('…', '...')
+        .replaceAll('\t', '    ')
+        .runes
+        .where((r) => r == 10 || (r >= 32 && r <= 255))
+        .map((r) => String.fromCharCode(r))
+        .join();
+  }
+
+  // =========================
+  // TCP
+  // =========================
+
   Future<void> _printTcp({
     required String host,
     required int port,
     required List<int> bytes,
   }) async {
-    final socket = await Socket.connect(
-      host,
-      port,
-      timeout: const Duration(seconds: 5),
-    );
-    socket.add(Uint8List.fromList(bytes));
-    await socket.flush();
-    await socket.close();
+    Socket? socket;
+    try {
+      debugPrint("_printTcp -> conectando a $host:$port");
+      socket = await Socket.connect(
+        host,
+        port,
+        timeout: const Duration(seconds: 10),
+      );
+      debugPrint("_printTcp -> conectado");
+
+      socket.add(Uint8List.fromList(bytes));
+      await socket.flush();
+
+      // algunas impresoras/cajones reaccionan mejor si les das un pequeño respiro
+      await Future.delayed(const Duration(milliseconds: 250));
+
+      debugPrint("_printTcp -> bytes enviados: ${bytes.length}");
+    } catch (e, st) {
+      debugPrint("_printTcp -> error: $e");
+      debugPrint("$st");
+      rethrow;
+    } finally {
+      await socket?.close();
+      debugPrint("_printTcp -> socket cerrado");
+    }
   }
 
-  // ---------------- BLE ----------------
+  // =========================
+  // BLE
+  // =========================
+
   Future<void> _printBle({
     required String deviceId,
     required String serviceUuid,
@@ -311,28 +550,52 @@ class PrinterService {
     final device = ble.BluetoothDevice.fromId(deviceId);
 
     try {
-      await device.connect(timeout: const Duration(seconds: 10));
-    } catch (_) {}
-
-    final services = await device.discoverServices();
-
-    final svc = services.firstWhere(
-      (s) => s.uuid.toString().toLowerCase() == serviceUuid.toLowerCase(),
-    );
-
-    final ch = svc.characteristics.firstWhere(
-      (c) => c.uuid.toString().toLowerCase() == charUuid.toLowerCase(),
-    );
-
-    // Si mandas imágenes por BLE y se corta, baja a 120
-    const chunkSize = 180;
-    for (int i = 0; i < bytes.length; i += chunkSize) {
-      final end = (i + chunkSize > bytes.length) ? bytes.length : i + chunkSize;
-      await ch.write(
-        Uint8List.fromList(bytes.sublist(i, end)),
-        withoutResponse: withoutResponse,
+      debugPrint("_printBle -> connect deviceId=$deviceId");
+      await device.connect(
+        timeout: const Duration(seconds: 10),
+        autoConnect: false,
       );
-      await Future.delayed(const Duration(milliseconds: 30));
+    } catch (e) {
+      debugPrint("_printBle -> connect warning/error: $e");
+    }
+
+    try {
+      final services = await device.discoverServices();
+      debugPrint("_printBle -> services encontrados: ${services.length}");
+
+      final svc = services.firstWhere(
+        (s) => s.uuid.toString().toLowerCase() == serviceUuid.toLowerCase(),
+      );
+
+      final ch = svc.characteristics.firstWhere(
+        (c) => c.uuid.toString().toLowerCase() == charUuid.toLowerCase(),
+      );
+
+      const chunkSize = 180;
+
+      for (int i = 0; i < bytes.length; i += chunkSize) {
+        final end = (i + chunkSize > bytes.length)
+            ? bytes.length
+            : i + chunkSize;
+
+        await ch.write(
+          Uint8List.fromList(bytes.sublist(i, end)),
+          withoutResponse: withoutResponse,
+        );
+
+        await Future.delayed(const Duration(milliseconds: 30));
+      }
+
+      debugPrint("_printBle -> bytes enviados: ${bytes.length}");
+    } catch (e, st) {
+      debugPrint("_printBle -> error: $e");
+      debugPrint("$st");
+      rethrow;
+    } finally {
+      try {
+        await device.disconnect();
+        debugPrint("_printBle -> disconnected");
+      } catch (_) {}
     }
   }
 }

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as ble;
 
-import 'app_config.dart';
+import '../ble_scanner_page.dart';
 import 'printer_config.dart';
 import 'printer_service.dart';
 
@@ -21,90 +21,99 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
 
   // BLE
   ble.ScanResult? bleSelected;
+  String? bleDeviceIdSaved;
+  String? bleDeviceNameSaved;
   String? bleServiceUuid;
   String? bleCharUuid;
   bool bleWithoutResponse = true;
-
-  // SaaS / App
-  final baseUrlCtrl = TextEditingController(text: "https://mitiendaenlineamx.com.mx/api");
-  bool autoPrint = true;
-  String deviceId = "";
+  bool _resolvingBle = false;
 
   @override
   void initState() {
     super.initState();
-    _loadAll();
+    _loadConfig();
   }
 
   @override
   void dispose() {
     hostCtrl.dispose();
     portCtrl.dispose();
-    baseUrlCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _loadAll() async {
-    final cfg = await PrinterService.instance.loadConfig();
-    final appCfg = await AppConfig.load();
+  Future<void> _loadConfig() async {
+    try {
+      final cfg = await PrinterService.instance.loadConfig();
 
-    setState(() {
-      // impresora
-      if (cfg != null) {
-        mode = (cfg.mode == PrinterMode.btClassic) ? PrinterMode.tcp : cfg.mode;
+      if (!mounted || cfg == null) return;
+
+      setState(() {
+        mode = (cfg.mode == PrinterMode.btClassic)
+            ? PrinterMode.tcp
+            : cfg.mode;
 
         hostCtrl.text = cfg.host ?? "";
         portCtrl.text = (cfg.port ?? 9100).toString();
 
+        bleDeviceIdSaved = cfg.bleDeviceId;
+        bleDeviceNameSaved = cfg.bleDeviceName;
         bleServiceUuid = cfg.bleServiceUuid;
         bleCharUuid = cfg.bleCharUuid;
         bleWithoutResponse = cfg.bleWithoutResponse ?? true;
-        bleSelected = null; // no reconstruimos ScanResult
-      }
 
-      // app
-      baseUrlCtrl.text = appCfg.baseUrl;
-      autoPrint = appCfg.autoPrintEnabled;
-      deviceId = appCfg.deviceId;
-    });
+        bleSelected = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("❌ Error cargando configuración: $e")),
+      );
+    }
   }
 
   Future<void> _save() async {
-    // --- guarda impresora ---
     if (mode == PrinterMode.tcp) {
       final host = hostCtrl.text.trim();
       final port = int.tryParse(portCtrl.text.trim()) ?? 9100;
 
-      if (host.isEmpty) throw Exception("Escribe la IP/Host de la impresora");
-
-      await PrinterService.instance.saveConfig(
-        PrinterConfig(mode: PrinterMode.tcp, host: host, port: port),
-      );
-    } else {
-      if (bleSelected == null || bleServiceUuid == null || bleCharUuid == null) {
-        throw Exception("Selecciona impresora BLE y detecta UUIDs de escritura");
+      if (host.isEmpty) {
+        throw Exception("Ingresa la IP/Host de la impresora");
       }
 
       await PrinterService.instance.saveConfig(
         PrinterConfig(
-          mode: PrinterMode.ble,
-          bleDeviceId: bleSelected!.device.remoteId.str,
-          bleServiceUuid: bleServiceUuid,
-          bleCharUuid: bleCharUuid,
-          bleWithoutResponse: bleWithoutResponse,
+          mode: PrinterMode.tcp,
+          host: host,
+          port: port,
         ),
       );
+      return;
     }
 
-    // --- guarda config app ---
-    final base = baseUrlCtrl.text.trim();
-    if (base.isEmpty) throw Exception("Base URL no puede ir vacía");
+    final selectedDeviceId = bleSelected?.device.remoteId.str ?? bleDeviceIdSaved;
+    final selectedDeviceName = bleSelected != null
+        ? _deviceDisplayName(bleSelected!)
+        : bleDeviceNameSaved;
 
-    await AppConfig.save(AppConfig(
-      baseUrl: base,
-      autoPrintEnabled: autoPrint,
-      deviceId: deviceId,
-    ));
+    if (selectedDeviceId == null ||
+        selectedDeviceId.isEmpty ||
+        bleServiceUuid == null ||
+        bleServiceUuid!.isEmpty ||
+        bleCharUuid == null ||
+        bleCharUuid!.isEmpty) {
+      throw Exception("Selecciona impresora BLE y detecta UUIDs de escritura");
+    }
+
+    await PrinterService.instance.saveConfig(
+      PrinterConfig(
+        mode: PrinterMode.ble,
+        bleDeviceId: selectedDeviceId,
+        bleDeviceName: selectedDeviceName,
+        bleServiceUuid: bleServiceUuid,
+        bleCharUuid: bleCharUuid,
+        bleWithoutResponse: bleWithoutResponse,
+      ),
+    );
   }
 
   Future<void> _testPrint() async {
@@ -112,79 +121,104 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
     await PrinterService.instance.printDemo();
   }
 
+  String _deviceDisplayName(ble.ScanResult result) {
+    if (result.device.advName.isNotEmpty) {
+      return result.device.advName;
+    }
+    if (result.advertisementData.advName.isNotEmpty) {
+      return result.advertisementData.advName;
+    }
+    return result.device.remoteId.str;
+  }
+
   Future<void> _pickBle() async {
+    if (_resolvingBle) return;
+
     setState(() {
+      _resolvingBle = true;
       bleSelected = null;
       bleServiceUuid = null;
       bleCharUuid = null;
       bleWithoutResponse = true;
     });
 
-    final results = <ble.ScanResult>[];
-
-    final sub = ble.FlutterBluePlus.scanResults.listen((list) {
-      for (final r in list) {
-        if (!results.any((x) => x.device.remoteId == r.device.remoteId)) {
-          results.add(r);
-        }
-      }
-      if (mounted) setState(() {});
-    });
-
-    await ble.FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
-    await Future.delayed(const Duration(seconds: 7));
-    await ble.FlutterBluePlus.stopScan();
-    await sub.cancel();
-
-    if (!mounted) return;
-
-    final chosen = await showModalBottomSheet<ble.ScanResult>(
-      context: context,
-      builder: (_) => ListView(
-        children: results.map((r) {
-          final name = r.device.advName.isNotEmpty
-              ? r.device.advName
-              : (r.advertisementData.advName.isNotEmpty ? r.advertisementData.advName : "(sin nombre)");
-          return ListTile(
-            title: Text(name),
-            subtitle: Text("RSSI ${r.rssi} • ${r.device.remoteId.str}"),
-            onTap: () => Navigator.pop(context, r),
-          );
-        }).toList(),
-      ),
-    );
-
-    if (chosen == null) return;
-
-    setState(() => bleSelected = chosen);
+    ble.ScanResult? chosen;
 
     try {
-      await chosen.device.connect(timeout: const Duration(seconds: 10), autoConnect: false);
-    } catch (_) {}
+      chosen = await Navigator.push<ble.ScanResult>(
+        context,
+        MaterialPageRoute(builder: (_) => const BleScannerPage()),
+      );
 
-    final services = await chosen.device.discoverServices();
+      if (!mounted) return;
 
-    for (final s in services) {
-      for (final c in s.characteristics) {
-        if (c.properties.write || c.properties.writeWithoutResponse) {
-          setState(() {
-            bleServiceUuid = s.uuid.toString();
-            bleCharUuid = c.uuid.toString();
-            bleWithoutResponse = c.properties.writeWithoutResponse;
-          });
-          return;
+      if (chosen == null) {
+        setState(() => _resolvingBle = false);
+        return;
+      }
+
+      setState(() {
+        bleSelected = chosen;
+        bleDeviceIdSaved = chosen!.device.remoteId.str;
+        bleDeviceNameSaved = _deviceDisplayName(chosen);
+      });
+
+      try {
+        await chosen.device.connect(
+          timeout: const Duration(seconds: 10),
+          autoConnect: false,
+        );
+      } catch (_) {}
+
+      final services = await chosen.device.discoverServices();
+
+      for (final s in services) {
+        for (final c in s.characteristics) {
+          if (c.properties.write || c.properties.writeWithoutResponse) {
+            if (!mounted) return;
+
+            setState(() {
+              bleServiceUuid = s.uuid.toString();
+              bleCharUuid = c.uuid.toString();
+              bleWithoutResponse = c.properties.writeWithoutResponse;
+              _resolvingBle = false;
+            });
+            return;
+          }
         }
+      }
+
+      throw Exception("Conectó, pero no encontré characteristic de escritura");
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _resolvingBle = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("❌ Error BLE: $e")),
+      );
+    } finally {
+      if (chosen != null) {
+        try {
+          await chosen.device.disconnect();
+        } catch (_) {}
       }
     }
 
-    throw Exception("Conectó, pero no encontré characteristic de escritura");
+    if (mounted) {
+      setState(() => _resolvingBle = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bleInfo = (bleSelected == null)
-        ? "Sin impresora BLE"
-        : "BLE: ${bleSelected!.device.advName.isNotEmpty ? bleSelected!.device.advName : bleSelected!.device.remoteId.str}";
+    final currentBleName = bleSelected != null
+        ? _deviceDisplayName(bleSelected!)
+        : (bleDeviceNameSaved?.isNotEmpty == true
+              ? bleDeviceNameSaved!
+              : (bleDeviceIdSaved?.isNotEmpty == true
+                    ? bleDeviceIdSaved!
+                    : "Sin impresora BLE"));
+
+    final bleInfo = "BLE: $currentBleName";
 
     final uuidInfo = (bleServiceUuid == null || bleCharUuid == null)
         ? "UUIDs de escritura: (no detectados)"
@@ -217,66 +251,62 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(12),
         children: [
-          const Text("Modo de impresora", style: TextStyle(fontWeight: FontWeight.bold)),
+          const Text(
+            "Modo de impresora",
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
           RadioListTile<PrinterMode>(
             value: PrinterMode.tcp,
             groupValue: mode,
             title: const Text("Ethernet / Wi-Fi (TCP 9100)"),
-            onChanged: (v) => setState(() => mode = v!),
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() => mode = v);
+            },
           ),
           RadioListTile<PrinterMode>(
             value: PrinterMode.ble,
             groupValue: mode,
             title: const Text("Bluetooth BLE (iOS/Android)"),
-            onChanged: (v) => setState(() => mode = v!),
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() => mode = v);
+            },
           ),
           const Divider(),
 
           if (mode == PrinterMode.tcp) ...[
             TextField(
               controller: hostCtrl,
-              decoration: const InputDecoration(labelText: "IP / Host (ej. 192.168.0.55)"),
+              decoration: const InputDecoration(
+                labelText: "IP / Host",
+                hintText: "192.168.1.118",
+              ),
             ),
+            const SizedBox(height: 12),
             TextField(
               controller: portCtrl,
-              decoration: const InputDecoration(labelText: "Puerto", hintText: "9100"),
+              decoration: const InputDecoration(
+                labelText: "Puerto",
+                hintText: "9100",
+              ),
               keyboardType: TextInputType.number,
             ),
           ],
 
           if (mode == PrinterMode.ble) ...[
             ListTile(
+              contentPadding: EdgeInsets.zero,
               title: Text(bleInfo),
               subtitle: Text(uuidInfo),
               trailing: ElevatedButton(
-                onPressed: _pickBle,
-                child: const Text("Buscar"),
+                onPressed: _resolvingBle ? null : _pickBle,
+                child: Text(_resolvingBle ? "Buscando..." : "Buscar"),
               ),
             ),
           ],
 
-          const SizedBox(height: 12),
-          const Divider(),
-          const Text("Configuración SaaS", style: TextStyle(fontWeight: FontWeight.bold)),
-
-          TextField(
-            controller: baseUrlCtrl,
-            decoration: const InputDecoration(labelText: "Base URL API"),
-          ),
-
-          SwitchListTile(
-            value: autoPrint,
-            title: const Text("Impresión automática"),
-            subtitle: const Text("Si está ON, la app preguntará al SaaS cada 2s si hay tickets pendientes."),
-            onChanged: (v) => setState(() => autoPrint = v),
-          ),
-
-          ListTile(
-            title: const Text("Device ID"),
-            subtitle: Text(deviceId),
-          ),
-
-          const SizedBox(height: 12),
+          const SizedBox(height: 20),
           ElevatedButton(
             onPressed: () async {
               try {
