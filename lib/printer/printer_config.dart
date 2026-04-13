@@ -1,5 +1,7 @@
 enum PrinterMode { tcp, ble, btClassic }
 
+enum PaperSizeMM { mm58, mm80 }
+
 class PrinterConfig {
   final PrinterMode mode;
 
@@ -17,6 +19,12 @@ class PrinterConfig {
   // BT Classic (Android)
   final String? btMac;
 
+  // Opciones de impresión
+  final PaperSizeMM paperSize;
+  final bool autoCut;
+  final bool openDrawer;
+  final int drawerPin;
+
   const PrinterConfig({
     required this.mode,
     this.host,
@@ -27,19 +35,27 @@ class PrinterConfig {
     this.bleCharUuid,
     this.bleWithoutResponse,
     this.btMac,
+    this.paperSize = PaperSizeMM.mm80,
+    this.autoCut = true,
+    this.openDrawer = false,
+    this.drawerPin = 0,
   });
 
   Map<String, dynamic> toMap() => {
-        "mode": mode.name,
-        "host": host,
-        "port": port,
-        "bleDeviceId": bleDeviceId,
-        "bleDeviceName": bleDeviceName,
-        "bleServiceUuid": bleServiceUuid,
-        "bleCharUuid": bleCharUuid,
-        "bleWithoutResponse": bleWithoutResponse,
-        "btMac": btMac,
-      };
+    "mode": mode.name,
+    "host": host,
+    "port": port,
+    "bleDeviceId": bleDeviceId,
+    "bleDeviceName": bleDeviceName,
+    "bleServiceUuid": bleServiceUuid,
+    "bleCharUuid": bleCharUuid,
+    "bleWithoutResponse": bleWithoutResponse,
+    "btMac": btMac,
+    "paperSize": paperSize.name,
+    "autoCut": autoCut,
+    "openDrawer": openDrawer,
+    "drawerPin": drawerPin,
+  };
 
   static PrinterConfig? fromMap(Map<String, dynamic> m) {
     final modeStr = m["mode"] as String?;
@@ -48,6 +64,12 @@ class PrinterConfig {
     final mode = PrinterMode.values.firstWhere(
       (e) => e.name == modeStr,
       orElse: () => PrinterMode.tcp,
+    );
+
+    final paperSizeStr = m["paperSize"] as String?;
+    final paperSize = PaperSizeMM.values.firstWhere(
+      (e) => e.name == paperSizeStr,
+      orElse: () => PaperSizeMM.mm80,
     );
 
     return PrinterConfig(
@@ -60,6 +82,10 @@ class PrinterConfig {
       bleCharUuid: m["bleCharUuid"] as String?,
       bleWithoutResponse: m["bleWithoutResponse"] as bool?,
       btMac: m["btMac"] as String?,
+      paperSize: paperSize,
+      autoCut: m["autoCut"] as bool? ?? true,
+      openDrawer: m["openDrawer"] as bool? ?? false,
+      drawerPin: (m["drawerPin"] as num?)?.toInt() ?? 0,
     );
   }
 }

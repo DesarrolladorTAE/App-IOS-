@@ -15,7 +15,9 @@ class PrinterService {
 
   static const _prefsKey = "printer_config";
 
+  static const int cols58mm = 32;
   static const int cols80mm = 48;
+  static const int dots58mm = 384;
   static const int dots80mm = 576;
 
   Future<void> saveConfig(PrinterConfig cfg) async {
@@ -31,12 +33,14 @@ class PrinterService {
     debugPrint("loadConfig -> raw: $raw");
 
     if (raw == null) return null;
-    return PrinterConfig.fromMap(jsonDecode(raw));
-  }
 
-  // =========================
-  // DEMO
-  // =========================
+    try {
+      return PrinterConfig.fromMap(jsonDecode(raw));
+    } catch (e) {
+      debugPrint("loadConfig -> error parseando config: $e");
+      return null;
+    }
+  }
 
   Future<void> printDemo() async {
     final cfg = await loadConfig();
@@ -44,25 +48,37 @@ class PrinterService {
       throw Exception("No hay impresora configurada");
     }
 
+    final paperSize = cfg.paperSize == PaperSizeMM.mm58 ? 58 : 80;
+
     final bytes = _buildTicket(
+      paperSizeMm: paperSize,
       textBeforeQr:
           "PRUEBA SIMPLE\nMI TIENDA EN LINEAMX\nHOLA MUNDO\nTOTAL: \$123.85",
       textAfterQr: "Gracias por su compra",
-      qrText: "https://mitiendaenlineamx.com.mx",
-      cut: true,
-      shouldOpenDrawer: true,
-      drawerPin: 0,
-      qrSize: 8,
-      qrEcc: 49,
-      logoMaxWidth: 220,
+      qrs: const [
+        {
+          "text": "https://mitiendaenlineamx.com.mx/facturacion-publica/demo",
+          "size": 6,
+          "caption": "Escanea para facturar",
+          "align": "center",
+          "ecc": 49,
+        },
+        {
+          "text": "https://mitiendaenlineamx.com.mx",
+          "size": 6,
+          "caption": "Visita nuestra tienda",
+          "align": "center",
+          "ecc": 49,
+        },
+      ],
+      cut: cfg.autoCut,
+      shouldOpenDrawer: cfg.openDrawer,
+      drawerPin: cfg.drawerPin,
+      logoMaxWidth: paperSize == 58 ? 256 : 384,
     );
 
     await _sendToConfiguredPrinter(cfg, bytes);
   }
-
-  // =========================
-  // PRINT JOB
-  // =========================
 
   Future<void> printJob(
     Map<String, dynamic> payload, {
@@ -72,12 +88,25 @@ class PrinterService {
     debugPrint("=== ENTRO A printJob CON BACKEND REAL ===");
     debugPrint("printJob -> payload keys: ${payload.keys.toList()}");
     debugPrint("printJob -> payload: $payload");
-    debugPrint("printJob -> host override: $host");
-    debugPrint("printJob -> port override: $port");
+
+    final cfg = await loadConfig();
+
+    final payloadPaper = payload["paper"] is Map
+        ? Map<String, dynamic>.from(payload["paper"] as Map)
+        : <String, dynamic>{};
+
+    final int backendPaperSize =
+        _readInt(payloadPaper["size"], fallback: 80) == 58 ? 58 : 80;
+
+    final int localPaperSize = cfg?.paperSize == PaperSizeMM.mm58 ? 58 : 80;
+
+    // Preferimos backend si viene válido
+    final int paperSizeMm = (backendPaperSize == 58 || backendPaperSize == 80)
+        ? backendPaperSize
+        : localPaperSize;
 
     final textBeforeQr = _readString(payload["textBeforeQr"]);
     final textAfterQr = _readString(payload["textAfterQr"]);
-    final qrText = _readString(payload["qrText"]);
 
     final imageBase64 = _firstNonEmptyString([
       payload["imageBase64"],
@@ -88,58 +117,104 @@ class PrinterService {
       payload["image_base64"],
     ]);
 
-    final cut = _readBool(payload["cut"], fallback: true);
-    final shouldOpenDrawer = _readBool(
-      payload["shouldOpenDrawer"] ?? payload["openDrawer"],
-      fallback: false,
-    );
-    final drawerPin = _readInt(payload["drawerPin"], fallback: 0);
-    final qrSize = _readInt(payload["qrSize"], fallback: 8).clamp(1, 16);
-    final qrEcc = _readInt(payload["qrEcc"], fallback: 49).clamp(48, 51);
-    final logoMaxWidth =
-        _readInt(payload["logoMaxWidth"], fallback: 260).clamp(64, dots80mm);
+    final cut = cfg != null
+        ? cfg.autoCut
+        : _readBool(payload["cut"], fallback: true);
 
-    debugPrint("printJob -> textBeforeQr len: ${textBeforeQr.length}");
-    debugPrint("printJob -> textAfterQr len: ${textAfterQr.length}");
-    debugPrint("printJob -> qrText len: ${qrText.length}");
-    debugPrint("printJob -> imageBase64 len: ${imageBase64.length}");
-    debugPrint("printJob -> cut: $cut");
-    debugPrint("printJob -> shouldOpenDrawer: $shouldOpenDrawer");
-    debugPrint("printJob -> drawerPin: $drawerPin");
-    debugPrint("printJob -> qrSize: $qrSize");
-    debugPrint("printJob -> qrEcc: $qrEcc");
-    debugPrint("printJob -> logoMaxWidth: $logoMaxWidth");
+    final shouldOpenDrawer = cfg != null
+        ? cfg.openDrawer
+        : _readBool(
+            payload["shouldOpenDrawer"] ?? payload["openDrawer"],
+            fallback: false,
+          );
+
+    final drawerPin = cfg != null
+        ? cfg.drawerPin
+        : _readInt(payload["drawerPin"], fallback: 0);
+
+    final int maxDots = paperSizeMm == 58 ? dots58mm : dots80mm;
+
+    final logoMaxWidth = _readInt(
+      payload["logoMaxWidth"],
+      fallback: paperSizeMm == 58 ? 256 : 384,
+    ).clamp(64, maxDots);
+
+    final qrs = _extractQrs(payload, fallbackPaperSize: paperSizeMm);
 
     final bytes = _buildTicket(
+      paperSizeMm: paperSizeMm,
       textBeforeQr: textBeforeQr,
       textAfterQr: textAfterQr.isEmpty ? null : textAfterQr,
       imageBase64: imageBase64.isEmpty ? null : imageBase64,
-      qrText: qrText.isEmpty ? null : qrText,
+      qrs: qrs,
       cut: cut,
       shouldOpenDrawer: shouldOpenDrawer,
       drawerPin: drawerPin,
-      qrSize: qrSize,
-      qrEcc: qrEcc,
       logoMaxWidth: logoMaxWidth,
     );
 
-    debugPrint("printJob -> bytes length: ${bytes.length}");
+    debugPrint("printJob -> bytes generados: ${bytes.length}");
 
     if (host != null && host.trim().isNotEmpty) {
-      await _printTcp(
-        host: host.trim(),
-        port: port ?? 9100,
-        bytes: bytes,
-      );
+      await _printTcp(host: host.trim(), port: port ?? 9100, bytes: bytes);
       return;
     }
 
-    final cfg = await loadConfig();
     if (cfg == null) {
       throw Exception("No hay impresora configurada");
     }
 
     await _sendToConfiguredPrinter(cfg, bytes);
+  }
+
+  List<Map<String, dynamic>> _extractQrs(
+    Map<String, dynamic> payload, {
+    required int fallbackPaperSize,
+  }) {
+    final result = <Map<String, dynamic>>[];
+
+    final rawQrs = payload["qrs"];
+    if (rawQrs is List) {
+      for (final item in rawQrs) {
+        if (item is Map) {
+          final itemMap = Map<String, dynamic>.from(item);
+          final text = _readString(itemMap["text"]).trim();
+          if (text.isEmpty) continue;
+
+          result.add({
+            "text": text,
+            "size": _readInt(
+              itemMap["size"],
+              fallback: fallbackPaperSize == 58 ? 5 : 7,
+            ).clamp(1, 16),
+            "caption": _readString(itemMap["caption"]),
+            "align": _readString(itemMap["align"]).trim().isEmpty
+                ? "center"
+                : _readString(itemMap["align"]).trim().toLowerCase(),
+            "ecc": _readInt(itemMap["ecc"], fallback: 49).clamp(48, 51),
+          });
+        }
+      }
+    }
+
+    // Compatibilidad con payload viejo
+    if (result.isEmpty) {
+      final qrText = _readString(payload["qrText"]).trim();
+      if (qrText.isNotEmpty) {
+        result.add({
+          "text": qrText,
+          "size": _readInt(
+            payload["qrSize"],
+            fallback: fallbackPaperSize == 58 ? 5 : 7,
+          ).clamp(1, 16),
+          "caption": "",
+          "align": "center",
+          "ecc": _readInt(payload["qrEcc"], fallback: 49).clamp(48, 51),
+        });
+      }
+    }
+
+    return result;
   }
 
   Future<void> _sendToConfiguredPrinter(
@@ -155,7 +230,7 @@ class PrinterService {
         }
 
         await _printTcp(
-          host: cfg.host!,
+          host: cfg.host!.trim(),
           port: cfg.port ?? 9100,
           bytes: bytes,
         );
@@ -182,20 +257,15 @@ class PrinterService {
     }
   }
 
-  // =========================
-  // ESC/POS BUILDER
-  // =========================
-
   List<int> _buildTicket({
+    required int paperSizeMm,
     required String textBeforeQr,
     String? textAfterQr,
     bool cut = true,
     bool shouldOpenDrawer = false,
     int drawerPin = 0,
     String? imageBase64,
-    String? qrText,
-    int qrSize = 8,
-    int qrEcc = 49,
+    List<Map<String, dynamic>> qrs = const [],
     int logoMaxWidth = 160,
   }) {
     final out = <int>[];
@@ -203,9 +273,7 @@ class PrinterService {
     out.addAll(_init());
 
     if (shouldOpenDrawer) {
-      debugPrint("_buildTicket -> abriendo cajon al inicio (pin=$drawerPin)");
-
-      // Doble pulso: algunas impresoras/cajones responden mejor así
+      debugPrint("_buildTicket -> abrir cajón pin=$drawerPin");
       out.addAll(_drawerPulse(m: drawerPin, t1: 60, t2: 255));
       out.addAll(_lf(1));
       out.addAll(_drawerPulseAlt(m: drawerPin, t1: 60, t2: 255));
@@ -218,8 +286,6 @@ class PrinterService {
       out.addAll(_imageFromBase64(imageBase64, maxDotsWidth: logoMaxWidth));
       out.addAll(_lf(1));
       out.addAll(_alignLeft());
-    } else {
-      debugPrint("_buildTicket -> sin logo");
     }
 
     if (textBeforeQr.trim().isNotEmpty) {
@@ -228,25 +294,57 @@ class PrinterService {
       out.addAll(_lf(1));
     }
 
-    if (qrText != null && qrText.trim().isNotEmpty) {
-      out.addAll(_alignCenter());
-      out.addAll(_qr(qrText, size: qrSize, ecc: qrEcc));
+    for (final qr in qrs) {
+      final text = _readString(qr["text"]).trim();
+      if (text.isEmpty) continue;
+
+      final size = _readInt(
+        qr["size"],
+        fallback: paperSizeMm == 58 ? 5 : 7,
+      ).clamp(1, 16);
+
+      final ecc = _readInt(qr["ecc"], fallback: 49).clamp(48, 51);
+      final caption = _readString(qr["caption"]).trim();
+      final align = _readString(qr["align"]).trim().toLowerCase();
+
+      out.addAll(_setAlign(align));
+      out.addAll(_qr(text, size: size, ecc: ecc));
       out.addAll(_lf(1));
-      out.addAll(_alignCenter());
+
+      if (caption.isNotEmpty) {
+        out.addAll(_setAlign(align));
+        out.addAll(_text(caption));
+        out.addAll(_lf(1));
+      }
+
+      out.addAll(_lf(1));
     }
 
     if (textAfterQr != null && textAfterQr.trim().isNotEmpty) {
+      out.addAll(_alignLeft());
       out.addAll(_text(textAfterQr));
       out.addAll(_lf(1));
     }
 
-    out.addAll(_lf(2));
+    out.addAll(_lf(paperSizeMm == 58 ? 2 : 3));
 
     if (cut) {
+      debugPrint("_buildTicket -> corte automático");
       out.addAll(_cutPartial());
     }
 
     return out;
+  }
+
+  List<int> _setAlign(String align) {
+    switch (align) {
+      case 'left':
+        return _alignLeft();
+      case 'right':
+        return _alignRight();
+      default:
+        return _alignCenter();
+    }
   }
 
   List<int> _init() => [0x1B, 0x40];
@@ -256,48 +354,26 @@ class PrinterService {
     return List<int>.filled(count, 0x0A);
   }
 
-  List<int> _cutFull() => [0x1D, 0x56, 0x00];
-
   List<int> _cutPartial() => [0x1D, 0x56, 0x42, 0x00];
 
   List<int> _alignLeft() => [0x1B, 0x61, 0x00];
-
   List<int> _alignCenter() => [0x1B, 0x61, 0x01];
-
   List<int> _alignRight() => [0x1B, 0x61, 0x02];
 
-  List<int> _bold(bool on) => [0x1B, 0x45, on ? 0x01 : 0x00];
-
-  // ESC p m t1 t2
   List<int> _drawerPulse({int m = 0, int t1 = 60, int t2 = 255}) {
     return [0x1B, 0x70, m & 0xFF, t1 & 0xFF, t2 & 0xFF];
   }
 
-  // Variante alternativa usada por algunos modelos
   List<int> _drawerPulseAlt({int m = 0, int t1 = 60, int t2 = 255}) {
     return [0x1B, 0x70, (m == 0 ? 1 : 0) & 0xFF, t1 & 0xFF, t2 & 0xFF];
   }
 
   List<int> _text(String text) {
-    final clean =
-        _sanitizeText(text).replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final clean = _sanitizeText(
+      text,
+    ).replaceAll('\r\n', '\n').replaceAll('\r', '\n');
     return latin1.encode(clean);
   }
-
-  List<int> _hr({int cols = cols80mm, String ch = '-'}) {
-    return latin1.encode("${ch * cols}\n");
-  }
-
-  List<int> _lineLR(String left, String right, {int cols = cols80mm}) {
-    final l = left.length > cols ? left.substring(0, cols) : left;
-    final r = right.length > cols ? right.substring(0, cols) : right;
-    final spaces = (cols - l.length - r.length).clamp(1, cols);
-    return latin1.encode("$l${' ' * spaces}$r\n");
-  }
-
-  // =========================
-  // IMAGEN -> ESC/POS raster GS v 0
-  // =========================
 
   List<int> _imageFromBase64(
     String base64OrDataUrl, {
@@ -306,7 +382,7 @@ class PrinterService {
     try {
       final raw = base64OrDataUrl.trim();
       if (raw.isEmpty) {
-        debugPrint("_imageFromBase64 -> vacio");
+        debugPrint("_imageFromBase64 -> vacío");
         return [];
       }
 
@@ -314,35 +390,17 @@ class PrinterService {
           ? raw.split('base64,').last.trim()
           : raw;
 
-      debugPrint("_imageFromBase64 -> raw len: ${raw.length}");
-      debugPrint("_imageFromBase64 -> clean len: ${clean.length}");
-
       final bytes = base64Decode(clean);
-      debugPrint("_imageFromBase64 -> decoded bytes: ${bytes.length}");
-
       final decoded = img.decodeImage(bytes);
       if (decoded == null) {
-        debugPrint("_imageFromBase64 -> decodeImage devolvio null");
+        debugPrint("_imageFromBase64 -> no se pudo decodificar imagen");
         return [];
       }
 
-      debugPrint(
-        "_imageFromBase64 -> original image: ${decoded.width}x${decoded.height}",
-      );
-
       final scaled = _scaleImageToWidth(decoded, maxDotsWidth);
-
-      debugPrint(
-        "_imageFromBase64 -> scaled image: ${scaled.width}x${scaled.height}",
-      );
-
-      final raster = _bitmapToRasterEscPos(scaled);
-      debugPrint("_imageFromBase64 -> raster bytes: ${raster.length}");
-
-      return raster;
-    } catch (e, st) {
+      return _bitmapToRasterEscPos(scaled);
+    } catch (e) {
       debugPrint("_imageFromBase64 -> error: $e");
-      debugPrint("$st");
       return [];
     }
   }
@@ -388,12 +446,7 @@ class PrinterService {
     final yL = height & 0xFF;
     final yH = (height >> 8) & 0xFF;
 
-    return [
-      0x1D, 0x76, 0x30, 0x00,
-      xL, xH, yL, yH,
-      ...imageBytes,
-      0x0A,
-    ];
+    return [0x1D, 0x76, 0x30, 0x00, xL, xH, yL, yH, ...imageBytes, 0x0A];
   }
 
   bool _isBlack(img.Pixel p) {
@@ -408,10 +461,6 @@ class PrinterService {
     return lum < 180;
   }
 
-  // =========================
-  // QR ESC/POS (GS ( k)
-  // =========================
-
   List<int> _qr(String content, {int size = 8, int ecc = 49}) {
     final data = utf8.encode(content);
     final out = <int>[];
@@ -419,10 +468,16 @@ class PrinterService {
     final s = size.clamp(1, 16);
     final e = ecc.clamp(48, 51);
 
+    // Select model 2
     out.addAll([0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]);
+
+    // Module size
     out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, s]);
+
+    // Error correction
     out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, e]);
 
+    // Store data
     final len = data.length + 3;
     final pL = len & 0xFF;
     final pH = (len >> 8) & 0xFF;
@@ -430,15 +485,12 @@ class PrinterService {
     out.addAll([0x1D, 0x28, 0x6B, pL, pH, 0x31, 0x50, 0x30]);
     out.addAll(data);
 
+    // Print QR
     out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30]);
     out.add(0x0A);
 
     return out;
   }
-
-  // =========================
-  // HELPERS
-  // =========================
 
   String _readString(dynamic value) {
     if (value == null) return '';
@@ -461,9 +513,11 @@ class PrinterService {
 
   bool _readBool(dynamic value, {bool fallback = false}) {
     if (value is bool) return value;
+
     final s = (value?.toString() ?? '').trim().toLowerCase();
     if (s == 'true' || s == '1') return true;
     if (s == 'false' || s == '0') return false;
+
     return fallback;
   }
 
@@ -500,10 +554,6 @@ class PrinterService {
         .join();
   }
 
-  // =========================
-  // TCP
-  // =========================
-
   Future<void> _printTcp({
     required String host,
     required int port,
@@ -517,28 +567,19 @@ class PrinterService {
         port,
         timeout: const Duration(seconds: 10),
       );
-      debugPrint("_printTcp -> conectado");
 
       socket.add(Uint8List.fromList(bytes));
       await socket.flush();
-
-      // algunas impresoras/cajones reaccionan mejor si les das un pequeño respiro
       await Future.delayed(const Duration(milliseconds: 250));
 
       debugPrint("_printTcp -> bytes enviados: ${bytes.length}");
-    } catch (e, st) {
+    } catch (e) {
       debugPrint("_printTcp -> error: $e");
-      debugPrint("$st");
       rethrow;
     } finally {
       await socket?.close();
-      debugPrint("_printTcp -> socket cerrado");
     }
   }
-
-  // =========================
-  // BLE
-  // =========================
 
   Future<void> _printBle({
     required String deviceId,
@@ -550,18 +591,14 @@ class PrinterService {
     final device = ble.BluetoothDevice.fromId(deviceId);
 
     try {
-      debugPrint("_printBle -> connect deviceId=$deviceId");
       await device.connect(
         timeout: const Duration(seconds: 10),
         autoConnect: false,
       );
-    } catch (e) {
-      debugPrint("_printBle -> connect warning/error: $e");
-    }
+    } catch (_) {}
 
     try {
       final services = await device.discoverServices();
-      debugPrint("_printBle -> services encontrados: ${services.length}");
 
       final svc = services.firstWhere(
         (s) => s.uuid.toString().toLowerCase() == serviceUuid.toLowerCase(),
@@ -587,14 +624,12 @@ class PrinterService {
       }
 
       debugPrint("_printBle -> bytes enviados: ${bytes.length}");
-    } catch (e, st) {
+    } catch (e) {
       debugPrint("_printBle -> error: $e");
-      debugPrint("$st");
       rethrow;
     } finally {
       try {
         await device.disconnect();
-        debugPrint("_printBle -> disconnected");
       } catch (_) {}
     }
   }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import 'printer/app_config.dart';
 import 'printer/printer_service.dart';
 import 'printer/printer_settings_page.dart';
 
@@ -31,28 +32,80 @@ class WebTest extends StatefulWidget {
 class _WebTestState extends State<WebTest> {
   double progress = 0;
   String? error;
+  String? currentUrl;
+  InAppWebViewController? webViewController;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadInitialUrl();
+  }
+
+  Future<void> _loadInitialUrl() async {
+    final cfg = await AppConfig.load();
+    final url = AppConfig.urlForMode(cfg.startAccessMode);
+
+    if (!mounted) return;
+    setState(() {
+      currentUrl = url;
+      error = null;
+      progress = 0;
+    });
+  }
+
+  Future<void> _reloadFromConfig() async {
+    final cfg = await AppConfig.load();
+    final url = AppConfig.urlForMode(cfg.startAccessMode);
+
+    if (!mounted) return;
+
+    setState(() {
+      currentUrl = url;
+      error = null;
+      progress = 0;
+    });
+
+    if (webViewController != null) {
+      await webViewController!.loadUrl(
+        urlRequest: URLRequest(url: WebUri(url)),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (currentUrl == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text("MI TIENDA EN LINEAMX"),
         actions: [
           IconButton(
-            tooltip: "Configurar impresora",
+            tooltip: "Configurar impresora y app",
             icon: const Icon(Icons.settings),
             onPressed: () async {
-              await Navigator.push(
+              final shouldReloadWebView = await Navigator.push<bool>(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => const PrinterSettingsPage(),
-                ),
+                MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
               );
+
+              if (shouldReloadWebView == true) {
+                await _reloadFromConfig();
+              }
 
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text("Configuración guardada")),
               );
+            },
+          ),
+          IconButton(
+            tooltip: "Recargar vista",
+            icon: const Icon(Icons.refresh),
+            onPressed: () async {
+              await _reloadFromConfig();
             },
           ),
           IconButton(
@@ -68,9 +121,9 @@ class _WebTestState extends State<WebTest> {
                 );
               } catch (e) {
                 if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text("❌ $e")),
-                );
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(SnackBar(content: Text("❌ $e")));
               }
             },
           ),
@@ -79,15 +132,15 @@ class _WebTestState extends State<WebTest> {
       body: Stack(
         children: [
           InAppWebView(
-            initialUrlRequest: URLRequest(
-              url: WebUri("https://mitiendaenlineamx.com.mx/login-register"),
-            ),
+            initialUrlRequest: URLRequest(url: WebUri(currentUrl!)),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
               transparentBackground: false,
               useHybridComposition: true,
             ),
             onWebViewCreated: (controller) {
+              webViewController = controller;
+
               controller.addJavaScriptHandler(
                 handlerName: 'printTicket',
                 callback: (args) async {
@@ -116,29 +169,17 @@ class _WebTestState extends State<WebTest> {
                       port = int.tryParse(portRaw.toString());
                     }
 
-                    debugPrint("bridge printTicket -> request keys: ${request.keys.toList()}");
-                    debugPrint("bridge printTicket -> host: $host");
-                    debugPrint("bridge printTicket -> port: $port");
-                    debugPrint("bridge printTicket -> payload keys: ${payload.keys.toList()}");
-                    debugPrint("bridge printTicket -> payload: $payload");
-
                     await PrinterService.instance.printJob(
                       payload,
                       host: host.isEmpty ? null : host,
                       port: port,
                     );
 
-                    return {
-                      "ok": true,
-                      "message": "Impresión enviada",
-                    };
+                    return {"ok": true, "message": "Impresión enviada"};
                   } catch (e, st) {
                     debugPrint("bridge printTicket -> error: $e");
                     debugPrint("$st");
-                    return {
-                      "ok": false,
-                      "message": e.toString(),
-                    };
+                    return {"ok": false, "message": e.toString()};
                   }
                 },
               );
@@ -164,10 +205,7 @@ class _WebTestState extends State<WebTest> {
             Center(
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text(
-                  error!,
-                  textAlign: TextAlign.center,
-                ),
+                child: Text(error!, textAlign: TextAlign.center),
               ),
             ),
         ],
