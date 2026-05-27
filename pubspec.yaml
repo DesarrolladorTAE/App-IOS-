@@ -45,6 +45,8 @@ dependencies:
   # BLE
   flutter_blue_plus: ^1.35.1
 
+  flutter_usb_printer: ^0.1.0+1
+
 
 
 

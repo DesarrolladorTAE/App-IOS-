@@ -1,4 +1,4 @@
-enum PrinterMode { tcp, ble, btClassic }
+enum PrinterMode { tcp, ble, usb, btClassic }
 
 enum PaperSizeMM { mm58, mm80 }
 
@@ -16,10 +16,14 @@ class PrinterConfig {
   final String? bleCharUuid;
   final bool? bleWithoutResponse;
 
-  // BT Classic (Android)
+  // USB Android
+  final int? usbVendorId;
+  final int? usbProductId;
+  final String? usbDeviceName;
+
+  // BT Classic futuro
   final String? btMac;
 
-  // Opciones de impresión
   final PaperSizeMM paperSize;
   final bool autoCut;
   final bool openDrawer;
@@ -34,6 +38,9 @@ class PrinterConfig {
     this.bleServiceUuid,
     this.bleCharUuid,
     this.bleWithoutResponse,
+    this.usbVendorId,
+    this.usbProductId,
+    this.usbDeviceName,
     this.btMac,
     this.paperSize = PaperSizeMM.mm80,
     this.autoCut = true,
@@ -42,20 +49,23 @@ class PrinterConfig {
   });
 
   Map<String, dynamic> toMap() => {
-    "mode": mode.name,
-    "host": host,
-    "port": port,
-    "bleDeviceId": bleDeviceId,
-    "bleDeviceName": bleDeviceName,
-    "bleServiceUuid": bleServiceUuid,
-    "bleCharUuid": bleCharUuid,
-    "bleWithoutResponse": bleWithoutResponse,
-    "btMac": btMac,
-    "paperSize": paperSize.name,
-    "autoCut": autoCut,
-    "openDrawer": openDrawer,
-    "drawerPin": drawerPin,
-  };
+        "mode": mode.name,
+        "host": host,
+        "port": port,
+        "bleDeviceId": bleDeviceId,
+        "bleDeviceName": bleDeviceName,
+        "bleServiceUuid": bleServiceUuid,
+        "bleCharUuid": bleCharUuid,
+        "bleWithoutResponse": bleWithoutResponse,
+        "usbVendorId": usbVendorId,
+        "usbProductId": usbProductId,
+        "usbDeviceName": usbDeviceName,
+        "btMac": btMac,
+        "paperSize": paperSize.name,
+        "autoCut": autoCut,
+        "openDrawer": openDrawer,
+        "drawerPin": drawerPin,
+      };
 
   static PrinterConfig? fromMap(Map<String, dynamic> m) {
     final modeStr = m["mode"] as String?;
@@ -81,6 +91,9 @@ class PrinterConfig {
       bleServiceUuid: m["bleServiceUuid"] as String?,
       bleCharUuid: m["bleCharUuid"] as String?,
       bleWithoutResponse: m["bleWithoutResponse"] as bool?,
+      usbVendorId: (m["usbVendorId"] as num?)?.toInt(),
+      usbProductId: (m["usbProductId"] as num?)?.toInt(),
+      usbDeviceName: m["usbDeviceName"] as String?,
       btMac: m["btMac"] as String?,
       paperSize: paperSize,
       autoCut: m["autoCut"] as bool? ?? true,

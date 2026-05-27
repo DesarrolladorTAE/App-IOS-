@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as ble;
+import 'package:flutter_usb_printer/flutter_usb_printer.dart';
 import 'package:image/image.dart' as img;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -12,6 +13,8 @@ import 'printer_config.dart';
 class PrinterService {
   PrinterService._();
   static final instance = PrinterService._();
+
+  final FlutterUsbPrinter _usbPrinter = FlutterUsbPrinter();
 
   static const _prefsKey = "printer_config";
 
@@ -100,7 +103,6 @@ class PrinterService {
 
     final int localPaperSize = cfg?.paperSize == PaperSizeMM.mm58 ? 58 : 80;
 
-    // Preferimos backend si viene válido
     final int paperSizeMm = (backendPaperSize == 58 || backendPaperSize == 80)
         ? backendPaperSize
         : localPaperSize;
@@ -197,7 +199,6 @@ class PrinterService {
       }
     }
 
-    // Compatibilidad con payload viejo
     if (result.isEmpty) {
       final qrText = _readString(payload["qrText"]).trim();
       if (qrText.isNotEmpty) {
@@ -252,8 +253,22 @@ class PrinterService {
         );
         break;
 
+      case PrinterMode.usb:
+        if (cfg.usbVendorId == null || cfg.usbProductId == null) {
+          throw Exception("No hay impresora USB configurada");
+        }
+
+        await _printUsb(
+          vendorId: cfg.usbVendorId!,
+          productId: cfg.usbProductId!,
+          bytes: bytes,
+        );
+        break;
+
       case PrinterMode.btClassic:
-        throw Exception("BT clásico deshabilitado. Usa BLE o TCP.");
+        throw Exception(
+          "Bluetooth Classic aún no implementado. Usa BLE, USB o TCP.",
+        );
     }
   }
 
@@ -468,16 +483,10 @@ class PrinterService {
     final s = size.clamp(1, 16);
     final e = ecc.clamp(48, 51);
 
-    // Select model 2
     out.addAll([0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00]);
-
-    // Module size
     out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, s]);
-
-    // Error correction
     out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x45, e]);
 
-    // Store data
     final len = data.length + 3;
     final pL = len & 0xFF;
     final pH = (len >> 8) & 0xFF;
@@ -485,7 +494,6 @@ class PrinterService {
     out.addAll([0x1D, 0x28, 0x6B, pL, pH, 0x31, 0x50, 0x30]);
     out.addAll(data);
 
-    // Print QR
     out.addAll([0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30]);
     out.add(0x0A);
 
@@ -578,6 +586,29 @@ class PrinterService {
       rethrow;
     } finally {
       await socket?.close();
+    }
+  }
+
+  Future<void> _printUsb({
+    required int vendorId,
+    required int productId,
+    required List<int> bytes,
+  }) async {
+    try {
+      debugPrint("_printUsb -> conectando USB vendor=$vendorId product=$productId");
+
+      final connected = await _usbPrinter.connect(vendorId, productId);
+
+      if (connected != true) {
+        throw Exception("No se pudo conectar a la impresora USB");
+      }
+
+      await _usbPrinter.write(Uint8List.fromList(bytes));
+
+      debugPrint("_printUsb -> bytes enviados: ${bytes.length}");
+    } catch (e) {
+      debugPrint("_printUsb -> error: $e");
+      rethrow;
     }
   }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as ble;
+import 'package:flutter_usb_printer/flutter_usb_printer.dart';
 
 import '../ble_scanner_page.dart';
 import 'app_config.dart';
@@ -16,6 +17,8 @@ class PrinterSettingsPage extends StatefulWidget {
 class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   PrinterMode mode = PrinterMode.tcp;
 
+  final FlutterUsbPrinter usbPrinter = FlutterUsbPrinter();
+
   // TCP
   final hostCtrl = TextEditingController();
   final portCtrl = TextEditingController(text: "9100");
@@ -28,6 +31,13 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   String? bleCharUuid;
   bool bleWithoutResponse = true;
   bool _resolvingBle = false;
+
+  // USB
+  List<Map<String, dynamic>> usbDevices = [];
+  int? usbVendorId;
+  int? usbProductId;
+  String? usbDeviceName;
+  bool loadingUsb = false;
 
   // Config adicional
   PaperSizeMM selectedPaper = PaperSizeMM.mm80;
@@ -60,6 +70,8 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
 
       setState(() {
         if (printerCfg != null) {
+          // Si alguna config vieja trae btClassic, lo mandamos a TCP por ahora.
+          // La lógica btClassic se conserva en enum/config/service para futuro.
           mode = printerCfg.mode == PrinterMode.btClassic
               ? PrinterMode.tcp
               : printerCfg.mode;
@@ -73,6 +85,10 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
           bleCharUuid = printerCfg.bleCharUuid;
           bleWithoutResponse = printerCfg.bleWithoutResponse ?? true;
 
+          usbVendorId = printerCfg.usbVendorId;
+          usbProductId = printerCfg.usbProductId;
+          usbDeviceName = printerCfg.usbDeviceName;
+
           selectedPaper = printerCfg.paperSize;
           autoCut = printerCfg.autoCut;
           openDrawer = printerCfg.openDrawer;
@@ -85,6 +101,10 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
         startAccessMode = appCfg.startAccessMode;
         _originalStartAccessMode = appCfg.startAccessMode;
       });
+
+      if (printerCfg?.mode == PrinterMode.usb) {
+        await _loadUsbDevices();
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -113,9 +133,10 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
           drawerPin: drawerPin,
         ),
       );
-    } else {
+    } else if (mode == PrinterMode.ble) {
       final selectedDeviceId =
           bleSelected?.device.remoteId.str ?? bleDeviceIdSaved;
+
       final selectedDeviceName = bleSelected != null
           ? _deviceDisplayName(bleSelected!)
           : bleDeviceNameSaved;
@@ -145,6 +166,27 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
           drawerPin: drawerPin,
         ),
       );
+    } else if (mode == PrinterMode.usb) {
+      if (usbVendorId == null || usbProductId == null) {
+        throw Exception("Selecciona una impresora USB");
+      }
+
+      await PrinterService.instance.saveConfig(
+        PrinterConfig(
+          mode: PrinterMode.usb,
+          usbVendorId: usbVendorId,
+          usbProductId: usbProductId,
+          usbDeviceName: usbDeviceName,
+          paperSize: selectedPaper,
+          autoCut: autoCut,
+          openDrawer: openDrawer,
+          drawerPin: drawerPin,
+        ),
+      );
+    } else if (mode == PrinterMode.btClassic) {
+      throw Exception(
+        "Bluetooth Classic está reservado para compatibilidad futura",
+      );
     }
 
     await AppConfig.save(
@@ -168,6 +210,29 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
       return result.advertisementData.advName;
     }
     return result.device.remoteId.str;
+  }
+
+  Future<void> _loadUsbDevices() async {
+    setState(() => loadingUsb = true);
+
+    try {
+      final results = await FlutterUsbPrinter.getUSBDeviceList();
+
+      if (!mounted) return;
+
+      setState(() {
+        usbDevices = List<Map<String, dynamic>>.from(results);
+        loadingUsb = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() => loadingUsb = false);
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text("❌ Error USB: $e")));
+    }
   }
 
   Future<void> _pickBle() async {
@@ -377,6 +442,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
               ],
             ),
           ),
+
           _sectionCard(
             icon: Icons.print,
             title: "Modo de impresora",
@@ -388,9 +454,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                   title: const Text("Ethernet / Wi-Fi (TCP 9100)"),
                   contentPadding: EdgeInsets.zero,
                   onChanged: (v) {
-                    if (v != null) {
-                      setState(() => mode = v);
-                    }
+                    if (v != null) setState(() => mode = v);
                   },
                 ),
                 RadioListTile<PrinterMode>(
@@ -399,14 +463,36 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                   title: const Text("Bluetooth BLE (iOS/Android)"),
                   contentPadding: EdgeInsets.zero,
                   onChanged: (v) {
+                    if (v != null) setState(() => mode = v);
+                  },
+                ),
+                RadioListTile<PrinterMode>(
+                  value: PrinterMode.usb,
+                  groupValue: mode,
+                  title: const Text("USB Android"),
+                  subtitle: const Text("Impresora térmica por cable USB/OTG"),
+                  contentPadding: EdgeInsets.zero,
+                  onChanged: (v) {
                     if (v != null) {
                       setState(() => mode = v);
+                      _loadUsbDevices();
                     }
                   },
                 ),
+                // RadioListTile<PrinterMode>(
+                //   value: PrinterMode.btClassic,
+                //   groupValue: mode,
+                //   title: const Text("Bluetooth Classic"),
+                //   subtitle: const Text("Reservado para compatibilidad futura"),
+                //   contentPadding: EdgeInsets.zero,
+                //   onChanged: (v) {
+                //     if (v != null) setState(() => mode = v);
+                //   },
+                // ),
               ],
             ),
           ),
+
           if (mode == PrinterMode.tcp)
             _sectionCard(
               icon: Icons.wifi,
@@ -434,6 +520,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                 ],
               ),
             ),
+
           if (mode == PrinterMode.ble)
             _sectionCard(
               icon: Icons.bluetooth,
@@ -461,6 +548,68 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                 ],
               ),
             ),
+
+          if (mode == PrinterMode.usb)
+            _sectionCard(
+              icon: Icons.usb,
+              title: "Configuración USB",
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    usbDeviceName == null
+                        ? "USB: Sin impresora seleccionada"
+                        : "USB: $usbDeviceName",
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: loadingUsb ? null : _loadUsbDevices,
+                      icon: const Icon(Icons.search),
+                      label: Text(loadingUsb ? "Buscando..." : "Buscar USB"),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ...usbDevices.map((device) {
+                    final vendor = int.tryParse("${device["vendorId"]}");
+                    final product = int.tryParse("${device["productId"]}");
+                    final name =
+                        "${device["manufacturer"] ?? ""} ${device["productName"] ?? ""}"
+                            .trim();
+
+                    return ListTile(
+                      leading: const Icon(Icons.usb),
+                      title: Text(name.isEmpty ? "Impresora USB" : name),
+                      subtitle: Text("Vendor: $vendor | Product: $product"),
+                      selected:
+                          usbVendorId == vendor && usbProductId == product,
+                      onTap: () {
+                        if (vendor == null || product == null) return;
+
+                        setState(() {
+                          usbVendorId = vendor;
+                          usbProductId = product;
+                          usbDeviceName = name.isEmpty ? "Impresora USB" : name;
+                        });
+                      },
+                    );
+                  }),
+                ],
+              ),
+            ),
+
+          // if (mode == PrinterMode.btClassic)
+          //   _sectionCard(
+          //     icon: Icons.bluetooth_connected,
+          //     title: "Bluetooth Classic",
+          //     child: const Text(
+          //       "Este modo está reservado para compatibilidad futura. "
+          //       "Por ahora usa Bluetooth BLE, USB Android o TCP/Wi-Fi.",
+          //     ),
+          //   ),
+
           _sectionCard(
             icon: Icons.receipt_long,
             title: "Formato de impresión",
@@ -529,7 +678,9 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
               ],
             ),
           ),
+
           const SizedBox(height: 10),
+
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
